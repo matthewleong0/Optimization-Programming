@@ -1,2 +1,2 @@
 # Optimization-Programming
-This details the knowledge I've obtained from the Stochastic Control and Optimization Class at UT Austin. More specifically, I am familar with Linear Programming, Integer Programming, Quadratic and Nonlinear programming, and Dynamic Programming. 
+This details the knowledge I've obtained from the Stochastic Control and Optimization Class at UT Austin. More specifically, I am familar with linear programming, integer Programming, nonlinear programming, quadratic programming, stochastic programming, and dynamic programming. These problems are done with R and gurobi but I am familiar with the concept in general and can adapt to a different programming language or different library. 
