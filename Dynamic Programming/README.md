@@ -1,4 +1,4 @@
-# Dynamic Programming various problems
+# Dynamic Programming Various Problems
   
 This details the various problems that I've done that relate to dynamic programming. My solution to these problems are found in the R file provided in this folder. 
   
@@ -6,7 +6,7 @@ This details the various problems that I've done that relate to dynamic programm
 In the network pictured below, find the shortest path from node 1 to node 10 and the shortest path from node 2 to node 10.  
 ![Dynamic Problem 1](dyn_pro_1.png)  
   
-## Problem 2: Optimizing Utility of cake eating  
+## Problem 2: Optimizing Utility of Cake Eating  
 Martin has 5 cakes and he can eat them within 3 days. Martin likes whole cake, so each day he eats an integer number of cakes or nothing. His happiness from eating i cakes on day t is 0.7(t-1)√𝑖. For example, if he eats 2 cakes on day 2, he will gain a utility of 0.71  √2.  Martin wants to maximize his total happiness, which is the sum of happiness from day 1 to day 3. How many cakes does Martin eat on the first day?  
   
 ## Problem 3: Formulating Optimization of Oil Drilling
