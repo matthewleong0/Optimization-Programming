@@ -1,0 +1,3 @@
+# Project 2: Integer and Linear Programming Demonstration
+## Optimizing the NASDAQ portfolio
+For this optimization project, I worked on the first linear program formulation regarding the stock selection and collaborated with another group member to develop the linear program to select the weights. This work is demonstrated in project_2_first_half.Rmd. The other half of the project can be seen in Project2_finalized where we all collaborated to ensure a good report. 
