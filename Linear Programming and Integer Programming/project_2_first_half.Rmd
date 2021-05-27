@@ -1,0 +1,589 @@
+---
+title: "Project 2"
+author: "Matthew Leong, India Lindsay, John Chen, Andrew Han"
+date: "3/18/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(gurobi)
+library(lpSolve)
+library(knitr)
+```
+
+## R Markdown
+
+
+## Read in the data
+
+```{r cars}
+# read the data
+train_df = read.csv('stocks2019.csv',header = TRUE, row.names = 1)
+test_df = read.csv('stocks2020.csv',header = TRUE, row.names = 1)
+```
+
+## Calculating returns and correlations of stocks
+
+Returns here are defined as:
+$$
+\frac{P_1-P_0}{P_0}
+$$
+where $P_0$ stands for the initial stock price and $P_1$ stands for the stock price at the end of one period which in the provided file is generally a day or 3 days if on a Friday. 
+```{r pressure, echo=FALSE}
+# let a be the rows of the return matrix. b be the columns.
+a = nrow(train_df)
+b = ncol(train_df)
+
+#In theory first row should consist of zeros.
+#Define as empty 0 matrix at first.
+return_matrix = matrix(0,a,b)
+
+#Identify rows as the date
+rownames(return_matrix) = rownames(train_df)
+
+#Identify columns as the index fund price and the stocks.
+colnames(return_matrix) = colnames(train_df)
+```
+
+```{r}
+#Iterate columns with i.
+#Use special R magic aka operate on all the rows except for the first because that will break it.
+#See the LaTex earlier for how the returns are calculated.
+for (i in 1:b){
+  #Translation from code speak: 
+  #returnmatrix for every row except one at column i (starting with 1 which is NDX) =
+  #(price at the end of the period - price at the beginning of the period)/(price at the beginning of the period)
+  return_matrix[2:a,i] = (train_df[2:a,i] - train_df[1:a-1,i])/train_df[1:a-1,i]
+}
+
+#also calculate return matrix for test
+c = nrow(test_df)
+d = ncol(test_df)
+test_return_matrix = matrix(0,c,d)
+rownames(test_return_matrix) = rownames(test_df)
+colnames(test_return_matrix) = colnames(test_df)
+for (i in 1:d){
+  test_return_matrix[2:c,i] = (test_df[2:c,i] - test_df[1:c-1,i])/test_df[1:c-1,i]
+}
+```
+
+```{r}
+#getting the correlations is simply just through cor built in function
+corr_matrix = cor(return_matrix)
+
+#Remove Index from correlation matrix.
+corr_matrix2 = corr_matrix[,-1]
+corr_matrix2 = corr_matrix2[-1,]
+
+#Redefine number of columns for stocks.
+r = ncol(corr_matrix2)
+```
+
+
+## Stock Selection IP
+```{r}
+#Choosing the stocks aka stock selection IP
+#essentially, get all the correlations for the first part. Next part is to represent the "ys".
+#The "ys" should have no bearing on the objective function so we give them values of 0.
+obj = c(as.vector(corr_matrix2),rep(0,r))
+#How it vectorizes it goes like this: 1,1;1,2;1,3,etc.
+
+#Define constraints. Just how many are there? A lot.
+#Need all the correlation entries in the correlation matrix. So r*r or r^2. 
+#Have one constraint for the ys aka 1 row
+#Have another set of constraints r to signify y_j (a chosen stock)
+
+#Adding all the number of row constraints together: r^2+1+r. Then r^2 for x_ij variables and r for y_j variables.
+A = matrix(0,r^2+1+r,r^2+r)
+
+m = 5
+
+#define y variable constraint (no b yet.) 
+A[1,(r^2+1):(r^2+r)] = rep(1,r) 
+
+#Row constraint x_ij = 1 sum.r constraints
+for (i in 1:r){
+  A[i+1,(r*(i-1)+1):(r*i)] = rep(1,r)
+}
+
+#r^2 constraints for x_ij \leq y_j. 
+
+#A[102:(102^2+101+1),x_ij variables]
+A[(r+2):(r^2+r+1), 1:r^2] = diag(1,r^2)
+
+#Define the y_js
+A[(r+2):(r^2+r+1), (r^2+1):(r^2+r)] = matrix(rep(diag(-1,r),r), nrow=r^2, byrow=T)
+
+#In order, m constraint, sum constraints, xij vs yj constraints
+b = c(m, rep(1,r), rep(0,r^2))
+#it's = for m and sum. < for xij vs yj
+sense = c(rep('=',(r+1)),rep('<',r^2))
+#They are all binary
+vartype = rep('B',r^2+r)
+
+# set up the model
+model = list()
+model$modelsense = 'max'
+model$obj = obj
+model$A = A
+model$rhs = b
+model$sense = sense
+model$vtype = vartype
+
+# solve the problem
+params = list()
+params$outputflag = 0
+sol = gurobi(model,params=params)
+
+# optimal allocation:
+x = sol$x
+```
+
+```{r}
+#Get the stocks
+stocks = tail(which(x %in% 1),m)
+for (i in 1:m) {
+  stocks[i] = stocks[i]-r^2
+}
+
+#Get the names of the stocks
+corr_names = colnames(corr_matrix2)
+names = rep(0,5)
+for (i in 1:m) {
+  names[i] = corr_names[stocks[i]]
+}
+```
+
+
+
+## Weights Problem
+$$
+min  \sum_{t=1}^T |q_t - \sum_{i=1}^mw_i r_{it} |
+$$
+
+#John's explanation
+$$
+min |q_1-\sum_{i=1}^mw_i*r_{i1}|+|q_2-\sum_{i=1}^mw_i*r_{i2}|...
+$$
+
+reformulate to:
+$$
+min \sum_{i=1}^T y_i
+$$
+where
+$$
+y_1 \geq q_1 - \sum_{i=1}^mw_ir_{i1} \\
+y_1 \geq \sum_{i=1}^mw_ir_{i1} -q_1
+$$
+
+Rows for A:
+$$
+2*t+1
+$$
+2t stands for every time.
+1 stands for the sum up to 1.
+
+```{r}
+t = nrow(return_matrix)
+#minimize weights
+objective = c(rep(0,m),rep(1,t))
+
+
+#Rows for A: 2t+1
+#2t stands for every time and 1 stands for the sum up to 1 constraint.
+A = matrix(0,2*t+1,m+t)
+b = rep(0,2*t+1)
+sense = rep('',2*t+1)
+
+#Weights sum up to one constraint
+A[1,] = c(rep(1,m),rep(0,t))
+b[1] = 1
+sense[1] = '='
+
+#One half of the absolute value to linear program constraint.
+for (i in 1:t){
+  A[i+1, m+i] = 1 #set y_i in this constraint to 1
+  for (j in 1:m){
+    #+1 to compensate for index being in return matrix
+    A[i+1,j] = return_matrix[i,stocks[j]+1]
+  }
+  b[i+1] = return_matrix[i,1]
+  sense[i+1] = '>'
+}
+
+#Other half of the absolute value to linear program constraint (negative)
+for (i in 1:t){
+  A[i+t+1, m+i] = 1 #set y_i in this constraint to 1
+  for (j in 1:m){
+    #+1 to compensate for index being in return matrix
+    A[i+t+1,j] = -return_matrix[i,stocks[j]+1]
+  }
+  b[i+t+1] = -return_matrix[i,1]
+  sense[i+t+1] = '>'
+}
+
+# set up the model
+model = list()
+model$modelsense = 'min'
+model$obj = objective
+model$A = A
+model$rhs = b
+model$lb = rep(0,m+t)
+model$sense = sense
+
+# solve the problem
+params = list()
+params$outputflag = 0
+sol = gurobi(model,params=params)
+
+# optimal allocation:
+x = sol$x
+```
+
+
+```{r}
+#Store the weights
+weights = x[1:5]
+#Testing it to 2020
+t2 = nrow(test_return_matrix)
+compare_sum_2020 = 0
+for (t in 1:t2) {
+  invest = 0
+  for (i in 1:m){
+    invest = invest + weights[i]*test_return_matrix[t,stocks[i]+1]
+  }
+  compare_sum_2020 = compare_sum_2020 + abs(test_return_matrix[t,1]-invest)
+}
+
+t = nrow(return_matrix)
+compare_sum_2019 = 0
+for (j in 1:t) {
+  invest = 0
+  for (i in 1:m){
+    invest = invest + weights[i]*return_matrix[j,stocks[i]+1]
+  }
+  compare_sum_2019 = compare_sum_2019 + abs(return_matrix[j,1]-invest)
+}
+```
+
+
+### Function time
+```{r}
+#Needs m (number of stocks), correlation matrix
+#Returns a list of ids that correspond to the chosen stocks
+get_stocks = function(m,corr_mat){
+  r = ncol(corr_mat)
+  obj = c(as.vector(corr_mat),rep(0,r))
+  A = matrix(0,r^2+1+r,r^2+r)
+  
+  #define y variable constraint (no b yet.) 
+  A[1,(r^2+1):(r^2+r)] = rep(1,r) 
+  
+  #Row constraint x_ij = 1 sum.r constraints
+  for (i in 1:r){
+    A[i+1,(r*(i-1)+1):(r*i)] = rep(1,r)
+  }
+  
+  #r^2 constraints for x_ij \leq y_j. 
+
+  #A[102:(102^2+101+1),x_ij variables]
+  A[(r+2):(r^2+r+1), 1:r^2] = diag(1,r^2)
+  
+  #Define the y_js
+  A[(r+2):(r^2+r+1), (r^2+1):(r^2+r)] = matrix(rep(diag(-1,r),r), nrow=r^2, byrow=T)
+  
+  #In order, m constraint, sum constraints, xij vs yj constraints
+  b = c(m, rep(1,r), rep(0,r^2))
+  #it's = for m and sum. < for xij vs yj
+  sense = c(rep('=',(r+1)),rep('<',r^2))
+  
+  #They are all binary
+  vartype = rep('B',r^2+r)
+  
+  # set up the model
+  model = list()
+  model$modelsense = 'max'
+  model$obj = obj
+  model$A = A
+  model$rhs = b
+  model$sense = sense
+  model$vtype = vartype
+  
+  # solve the problem
+  params = list()
+  params$outputflag = 0
+  sol = gurobi(model,params=params)
+  
+  # optimal allocation:
+  x = sol$x
+  
+  #Get the stocks
+  stocks = tail(which(x %in% 1),m)
+  for (i in 1:m) {
+    stocks[i] = stocks[i]-r^2
+  }
+  #returns the stocks which has the IDS
+  return(stocks)
+}
+```
+
+```{r}
+#Function get_weights accepts a return matrix, number of stocks, and a chosen stock list from get_stocks
+#It returns the solution to the integer program.
+get_weights_and_returns <- function(return_matrix,m,stocks){
+  t = nrow(return_matrix)
+  #minimize weights
+  objective = c(rep(0,m),rep(1,t))
+  
+  
+  #Rows for A: 2t+1
+  #2t stands for every time and 1 stands for the sum up to 1 constraint.
+  A = matrix(0,2*t+1,m+t)
+  b = rep(0,2*t+1)
+  sense = rep('',2*t+1)
+  
+  #Weights sum up to one constraint
+  A[1,] = c(rep(1,m),rep(0,t))
+  b[1] = 1
+  sense[1] = '='
+  
+  #One half of the absolute value to linear program constraint.
+  for (i in 1:t){
+    A[i+1, m+i] = 1 #set y_i in this constraint to 1
+    for (j in 1:m){
+      #+1 to compensate for index being in return matrix
+      A[i+1,j] = return_matrix[i,stocks[j]+1]
+    }
+    b[i+1] = return_matrix[i,1]
+    sense[i+1] = '>'
+  }
+  
+  #Other half of the absolute value to linear program constraint (negative)
+  for (i in 1:t){
+    A[i+t+1, m+i] = 1 #set y_i in this constraint to 1
+    for (j in 1:m){
+      #+1 to compensate for index being in return matrix
+      A[i+t+1,j] = -return_matrix[i,stocks[j]+1]
+    }
+    b[i+t+1] = -return_matrix[i,1]
+    sense[i+t+1] = '>'
+  }
+  
+  # set up the model
+  model = list()
+  model$modelsense = 'min'
+  model$obj = objective
+  model$A = A
+  model$rhs = b
+  model$lb = rep(0,m+t)
+  model$sense = sense
+  
+  # solve the problem
+  params = list()
+  params$outputflag = 0
+  sol = gurobi(model,params=params)
+  
+  # optimal allocation:
+  x = sol$x
+  #Return the solution. x[1:m] are the weights of the stocks. m:(t+m) are the returns for the years. 
+  return(x)
+}
+```
+
+```{r}
+#Function get_returns accepts a return matrix, its associated stocks_index_list, and its associated weights.
+#It returns the returns compared to the index for the entire year of the return matrix.
+get_returns <- function(return_mat,stocks_index_list,weights) {
+  t = nrow(return_mat)
+  m = length(stocks_index_list)
+  return_sum = 0
+  for (i in 1:t){
+    invest = 0
+    for (j in 1:m) {
+      invest = invest + weights[j]*return_mat[i,stocks_index_list[j]+1]
+    }
+  return_sum = return_sum + abs(return_mat[i,1]-invest)
+  }
+  return(return_sum)
+}
+```
+
+
+## 3. Comparing different values of m.
+
+```{r}
+compare_sum5_2019 = get_returns(return_matrix,stocks,weights)
+compare_sum5_2020 = get_returns(test_return_matrix,stocks,weights)
+```
+
+```{r}
+ten_stocks = get_stocks(10,corr_matrix2)
+
+ten_stocks_weights_and_returns = get_weights_and_returns(return_matrix,10,ten_stocks)
+ten_stocks_weights = ten_stocks_weights_and_returns[1:10]
+
+#This is here to double check. Do sum(ten_Stocks_returns_2019 and compare it to ten_stocks_sum2019)
+#The two values should be fairly similar.
+ten_stocks_returns_2019 = ten_stocks_weights_and_returns[11:(nrow(return_matrix)+10)]
+
+ten_stocks_sum2019 = get_returns(return_matrix,ten_stocks,ten_stocks_weights)
+ten_stocks_sum2020 = get_returns(test_return_matrix,ten_stocks,ten_stocks_weights)
+```
+
+
+```{r}
+twen_stocks = get_stocks(20,corr_matrix2)
+
+twen_stocks_weights_and_returns = get_weights_and_returns(return_matrix,20,twen_stocks)
+twen_stocks_weights = twen_stocks_weights_and_returns[1:20]
+twen_stocks_returns_2019 = twen_stocks_weights_and_returns[21:(nrow(return_matrix)+20)]
+
+twen_stocks_sum2019 = get_returns(return_matrix,twen_stocks,twen_stocks_weights)
+twen_stocks_sum2020 = get_returns(test_return_matrix,twen_stocks,twen_stocks_weights)
+```
+
+```{r}
+thirty_stocks = get_stocks(30,corr_matrix2)
+
+thirty_stocks_weights_and_returns = get_weights_and_returns(return_matrix,30,thirty_stocks)
+thirty_stocks_weights = thirty_stocks_weights_and_returns[1:30]
+thirty_stocks_returns_3019 = thirty_stocks_weights_and_returns[31:(nrow(return_matrix)+30)]
+
+thirty_stocks_sum2019 = get_returns(return_matrix,thirty_stocks,thirty_stocks_weights)
+thirty_stocks_sum2020 = get_returns(test_return_matrix,thirty_stocks,thirty_stocks_weights)
+```
+
+```{r}
+forty_stocks = get_stocks(40,corr_matrix2)
+
+forty_stocks_weights_and_returns = get_weights_and_returns(return_matrix,40,forty_stocks)
+forty_stocks_weights = forty_stocks_weights_and_returns[1:40]
+forty_stocks_returns_4019 = forty_stocks_weights_and_returns[41:(nrow(return_matrix)+40)]
+
+forty_stocks_sum2019 = get_returns(return_matrix,forty_stocks,forty_stocks_weights)
+forty_stocks_sum2020 = get_returns(test_return_matrix,forty_stocks,forty_stocks_weights)
+```
+
+```{r}
+fifty_stocks = get_stocks(50,corr_matrix2)
+
+fifty_stocks_weights_and_returns = get_weights_and_returns(return_matrix,50,fifty_stocks)
+fifty_stocks_weights = fifty_stocks_weights_and_returns[1:50]
+fifty_stocks_returns_5019 = fifty_stocks_weights_and_returns[51:(nrow(return_matrix)+50)]
+
+fifty_stocks_sum2019 = get_returns(return_matrix,fifty_stocks,fifty_stocks_weights)
+fifty_stocks_sum2020 = get_returns(test_return_matrix,fifty_stocks,fifty_stocks_weights)
+```
+
+```{r}
+sixty_stocks = get_stocks(60,corr_matrix2)
+
+sixty_stocks_weights_and_returns = get_weights_and_returns(return_matrix,60,sixty_stocks)
+sixty_stocks_weights = sixty_stocks_weights_and_returns[1:60]
+sixty_stocks_returns_2019 = sixty_stocks_weights_and_returns[61:(nrow(return_matrix)+60)]
+
+sixty_stocks_sum2019 = get_returns(return_matrix,sixty_stocks,sixty_stocks_weights)
+sixty_stocks_sum2020 = get_returns(test_return_matrix,sixty_stocks,sixty_stocks_weights)
+```
+
+```{r}
+seventy_stocks = get_stocks(70,corr_matrix2)
+
+seventy_stocks_weights_and_returns = get_weights_and_returns(return_matrix,70,seventy_stocks)
+seventy_stocks_weights = seventy_stocks_weights_and_returns[1:70]
+seventy_stocks_returns_2019 = seventy_stocks_weights_and_returns[71:(nrow(return_matrix)+70)]
+
+seventy_stocks_sum2019 = get_returns(return_matrix,seventy_stocks,seventy_stocks_weights)
+seventy_stocks_sum2020 = get_returns(test_return_matrix,seventy_stocks,seventy_stocks_weights)
+```
+
+```{r}
+eighty_stocks = get_stocks(80,corr_matrix2)
+
+eighty_stocks_weights_and_returns = get_weights_and_returns(return_matrix,80,eighty_stocks)
+eighty_stocks_weights = eighty_stocks_weights_and_returns[1:80]
+eighty_stocks_returns_2019 = eighty_stocks_weights_and_returns[81:(nrow(return_matrix)+80)]
+
+eighty_stocks_sum2019 = get_returns(return_matrix,eighty_stocks,eighty_stocks_weights)
+eighty_stocks_sum2020 = get_returns(test_return_matrix,eighty_stocks,eighty_stocks_weights)
+```
+
+```{r}
+ninety_stocks = get_stocks(90,corr_matrix2)
+
+ninety_stocks_weights_and_returns = get_weights_and_returns(return_matrix,90,ninety_stocks)
+ninety_stocks_weights = ninety_stocks_weights_and_returns[1:90]
+ninety_stocks_returns_2019 = ninety_stocks_weights_and_returns[91:(nrow(return_matrix)+90)]
+
+ninety_stocks_sum2019 = get_returns(return_matrix,ninety_stocks,ninety_stocks_weights)
+ninety_stocks_sum2090 = get_returns(test_return_matrix,ninety_stocks,ninety_stocks_weights)
+```
+
+```{r}
+entire_index = c(1:100)
+
+entire_index_weights_and_returns = get_weights_and_returns(return_matrix,100,entire_index)
+entire_index_weights = entire_index_weights_and_returns[1:100]
+entire_index_returns_2019 = entire_index_weights_and_returns[101:(nrow(return_matrix)+100)]
+
+entire_index_sum2019 = get_returns(return_matrix,entire_index,entire_index_weights)
+entire_index_sum2020 = get_returns(test_return_matrix,entire_index,entire_index_weights)
+```
+
+
+
+
+
+
+
+
+
+
+### Example to understand weights problem
+```{r}
+#Solving the example formulation
+objective = c(rep(1,3),0)
+
+A = matrix(0,6,4)
+b = rep(0,6)
+sense = rep('>',6)
+
+A[1,] = c(1,0,0,-1)
+A[2,] = c(1,0,0,1)
+b[1] = -1
+b[2] = 1
+
+A[3,] = c(0,1,0,-1)
+A[4,] = c(0,1,0,1)
+b[3] = -2
+b[4] = 2
+
+A[5,] = c(0,0,1,-1)
+A[6,] = c(0,0,1,1)
+b[5] = -3
+b[6] = 3
+
+# set up the model
+model = list()
+model$modelsense = 'min'
+model$obj = objective
+model$A = A
+model$rhs = b
+model$sense = sense
+
+# solve the problem
+params = list()
+params$outputflag = 0
+sol = gurobi(model,params=params)
+
+# optimal allocation:
+x = sol$x
+```
+
+
+##3 notes:
+
+If m $\leq$ ncol (do the function)
+else:
+don't do it.
