@@ -1,0 +1,554 @@
+---
+title: "Project Four - Stochastic Programming"
+author: "Group 10: Matthew Leong, Luke Bravo, Mervyn Jonathan, Joe Niehaus"
+date: "4/22/2021"
+output: html_document
+---
+
+<br>
+
+### Project Overview
+
+In this project, we will extend the Newsvendor (NV) model in a few ways to better approximate reality. In our first extension, we will assume that if you don’t print enough newspapers to satisfy demand, then you can send a rush order to the printers to print all that you need; additionally, if you print more than the demand you must pay a disposal fee of t dollars per newspaper. For simplicity's sake, we do not account for options like recycling where they may be some positive value of t.
+
+In our second extension of the NV model we will assume that price impacts demand linearly with error, 𝐷"=𝛽'+𝛽&𝑝+𝜖", and jointly solve for the optimal price and quantity to print.
+
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+```{r, include = FALSE}
+
+#loading in libraries
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(gurobi)
+library(kableExtra)
+library(knitr)
+library(tidyverse)
+# import data
+data <- read.csv("price_demand_data.csv") 
+
+```
+
+<br><br>
+
+#### `1` Fitting Linear Regression to Model Demand
+We start off simple, using R to fit a linear model regressing demand on price, which yields the following equation:
+```{r, echo=FALSE, results='asis'}
+
+lin_model = lm(demand ~ price, data)
+
+cat(paste0('\nDemand = ',round(lin_model$coefficients[1],4),' + (Price)(',round(lin_model$coefficients[2],2),')'))
+cat('\n\nSee relevant code below.')
+
+```
+```{r, echo = TRUE}
+
+# Fit a linear regression using R
+lin_model = lm(demand ~ price, data)
+summary(lin_model)
+
+```
+
+<br><br>
+
+#### `2` Generating Demand Data
+We get demand at any given point by adding the residuals from the regression above to the data to get demand when the price is one dollar.
+```{r, echo = TRUE}
+
+c = 0.5 # Printing cost
+g = 0.75 # Rush-print cost
+t = 0.15 # Disposal fee
+p = 1 # Price
+
+# Get demand residual points of the linear regression and store it
+data_resid = data %>% mutate(residuals = residuals(lin_model))
+
+# Add the residuals to the data to get demand at price 1 
+# Intuitively residuals are unexplained errors, add them to the model to get 100% explanation from the model.
+# If you want to check this, I suggest changing p to a price in the demand data. You will get the demand at that price.
+demand_p1 = data_resid %>% mutate(pred_demandp1 = lin_model$coefficients[1] + lin_model$coefficients[2]*p + data_resid[,"residuals"])
+
+```
+
+<br><br>
+
+#### `3` Finding Optimal Quantity to Produce when Price = $1.00 
+This problem is similar to the Newsvendor one we did in class but with some key differences. Namely, we have two conditions. We detail the first as when we produce too much and the second as when we produce too little both relative to the optimal demand. A note about this condition is that since rush printing costs are still less than the revenue we get from printing them, we always choose to rush print. 
+
+<br>
+
+*As a reminder for the following c is printing cost, g is rushed printing cost, t is disposal fee, and p is price.*
+
+<br>
+
+$$
+pD_i-qc-t(q-D_i) \, if \, q > D_i \\
+pD_i-qc-g(D_i-q) \, if \, q \leq D_i
+$$
+
+<br>
+
+*Now reformulate the above into constraints just like the newsvendor problem, A matrix should have anything related to h and q, right hand side should have anything related to demand. Regarding the case where demand exceeds quantity first:*
+
+<br>
+
+$$
+h_i \leq pD_i-qc-t(q-D_i) \\
+h_i + qc +t(q-D_i) \leq pD_i \\
+h_i + q(c+t) \leq (p+t)D_i \\
+$$
+
+<br>
+
+*If you're confused about why t is positive for demand. Think of it as canceling out the disposal fee in the quantity side. tD cancels part of tq essentially. There is still a disposal fee but now it correctly only takes into account the quantity that is actually disposed (q-D)t.*
+
+<br>
+
+$$
+h_i \leq pD_i - qc - g(D_i-q) \\
+h_i +qc-qg \leq pD_i - gD_i \\
+h_i +q(c-g) \leq (p-g)D_i
+$$
+
+<br>
+
+*Again for the cost of rushed newspapers. the above seems weird but think of it like this: p-g is the penalty assigned to newspapers. c-g offsets this penalty for all q prepared before hand. The remaining (D-q) then eat up the g penalty. So mathematically, q newspapers cost c and D-q newspapers cost g.*
+
+<br>
+
+##### *LP Model*
+These two formulations go in the constraint and RHS. See the code for this LP model below.
+```{r LP,echo = TRUE,results='asis'}
+
+# Get demand for price 1
+demand = demand_p1[,"pred_demandp1"]
+# Number of days of demand data, if you check data, there are 99 rows which this matches
+nd = length(demand) 
+
+# Decision variables are (q, h1, h2, ..., h99)
+# Objective is the same as in class. Take the average of all the days. Letting h be profit for each day.
+obj = c(0,rep(1/nd,nd))
+lb = c(0,rep(-Inf,nd)) # Quantity printed needs to be non-negative, but profit on a given day could possibly be negative
+
+# Number of constraints is number of days*2 ()
+A = matrix(0,2*nd,nd+1)
+rhs = rep(0,2*nd)
+dir = rep('<=',2*nd)
+
+
+for(r in 1:nd){ # For every day create two constraints
+  # This is the constraint where q > D
+  # h_i + q(c+t) \ leq (p+t)D_i 
+  A[2*r-1,c(1,r+1)] = c(c+t,1) # q first, 1 for h_i
+  rhs[2*r-1] = (p+t)*demand[r] # Represents the demand part
+  
+  # This is the constraint where q < D
+  # h_i +q(c-g) \ leq (p-g)D_i
+  A[2*r,c(1,r+1)] = c(c-g,1) # q first, 1 for h_i
+  rhs[2*r] = (p-g)*demand[r]
+}
+
+nv.model = list()
+nv.model$modelsense = 'max'
+nv.model$obj = obj
+nv.model$A = A
+nv.model$rhs = rhs
+nv.model$sense = dir
+nv.model$lb = lb
+
+pars = list()
+pars$outputflag = 0
+
+nv.sol = gurobi(nv.model,params=pars)
+
+```
+
+<br>
+
+##### *LP Model Results*
+Using the model above tells us that
+```{r, echo=FALSE, results='asis'}
+
+cat(paste0('optimal production level is ',round(nv.sol$x[1],0),' newspapers,')) # How many we should produce
+cat(paste0('and our expected profit is $',round(nv.sol$objval,2))) # Expectation of profits given that many produced - ish...
+
+```
+
+<br><br>
+
+#### `4` Using a Quadratic Model to Make Demand a Function of Price as Well
+QP is a bit simpler than QCP, because QP involves less matrix multiplication overall. The suggestion is having h be the negative cost on each day. The quadratic part would be the average revenue. 
+
+<br>
+
+*General form:*
+
+<br>
+
+$$
+max \, x^{T} Q x + c^{T}x
+$$
+
+<br>
+
+*How does letting price impact demand change the problem? Recall step 1 and 2.*
+
+<br>
+
+$$
+p*D_i = p(\beta_0+\beta_1*p+\epsilon)
+$$
+
+<br>
+
+*That is:*
+
+<br>
+
+```{r}
+lin_model$coefficients[1] + lin_model$coefficients[2]*p + data_resid[,"residuals"]
+```
+
+<br>
+
+*In this problem, we always strive to hit $pD_i$ thus, we can consider average revenue to be then:*
+
+<br>
+
+$$
+\frac{\beta_1p^2+(\beta_0 +\epsilon)p}{numberofdays}*numberofdays
+$$
+
+<br>
+
+*Negative cost on the other hand is the h's. Let us then consider the cases:*
+
+<br>
+
+$$
+-qc-t(q-D_i) \, if \, q > D_i \\
+-qc-g(D_i-q) \, if \, q \leq D_i
+$$
+
+<br>
+
+*Need to convert D to the appropriate equation:*
+
+<br>
+
+$$
+-qc-t(q -(\beta_0+\beta_1*p+\epsilon)) = -(qc+t(q-\beta_0-\beta_1*p-\epsilon)) \\
+-qc-g((\beta_0+\beta_1*p+\epsilon)-q) = -(qc+g(\beta_0+\beta_1*p+\epsilon-q)) 
+$$
+
+<br>
+
+*So bringing that together we have:*
+
+<br>
+
+$$
+Average Revenue - Cost each day \\
+\frac{\beta_1p^2+\beta_0 p+\epsilon p}{n}*n -h_i
+$$
+
+<br>
+
+*An interesting property if you recall is that the sum of residuals is actually 0. (if you don't believe me you can check: sum(data_resid[,"residuals"])) Average revenue thus is just the two coefficients of the linear regression model multiplied by price. How to formulate? Decision variables are:*
+
+<br>
+
+$$
+x = [p,q,h_{11},h_{12},...]
+$$
+
+<br>
+
+*New let h be the cost.*
+
+<br>
+
+*First the more quantity constraints*
+
+<br>
+
+$$
+h_i \leq -(qc+t(q-\beta_0-\beta_1*p-\epsilon)) \\
+h_i \leq -qc - -t(q-\beta_0-\beta_1*p-\epsilon) \\
+h_i + qc + tq \leq t\beta_0 + t \beta_1*p+t\epsilon \\
+h_i + (t+c)q - t\beta_1*p \leq t(\beta_0+\epsilon)
+$$
+
+<br>
+
+*Less quantity constraints:*
+
+<br>
+
+$$
+h_i \leq -(qc+g(\beta_0+\beta_1*p+\epsilon-q)) \\
+h_i +qc \leq -g(\beta_0+\beta_1*p+\epsilon-q) \\
+h_i +qc-qg + g\beta_1*P \leq -g(\beta_0+\epsilon) 
+$$
+
+<br>
+
+*Interesting thing to note is that only $p^2$ is quadratic meaning that the hint is very applicable. We only need p in the x vector to be quadratic. The rest is linear. That means the gurobi objective function should look something like this:*
+
+<br>
+
+$$
+Q = 
+\begin{pmatrix}
+\beta_1  & 0 & 0 & ..... & 0\\
+0 & ... & ... & ... & 0 \\
+. & . & . & . & . \\
+. & . & . & . & . \\
+. & ... & ... & ... & 0
+\end{pmatrix}
+$$
+
+<br>
+
+*Basically first term is just the coefficient of linear regression divided by number of days. This captures the quadratic part of the model. Meanwhile the linear should be:*
+
+<br>
+
+$$
+\beta_0p + 0*q + hpart
+$$
+
+<br>
+
+`hpart` *is negative costs. Hence the add for h.*
+
+<br>
+
+##### *QP Model*
+Ok, let's try everything described above in Gurobi!
+```{r}
+# Get demand for price 1
+
+# Number of days of demand data, if you check data, there are 99 rows which this matches
+nd = nrow(data) 
+
+# Decision variables are (p,q, h1, h2, ..., h99)
+# Total of 2+nd variables. Using all the data that is 101 variables.
+# Defining p as the first variable makes things easier.
+
+# Defining quadratic term
+# In the class notes this is the middle matrix term
+# +2 to account for price and quantity.
+quad = matrix(0,nd+2,nd+2)
+quad[1,1] = lin_model$coefficients[[2]]
+
+# Defining linear term
+# Since first term is price. Assign the appropriate coefficients to the objective
+obj = c(lin_model$coefficients[[1]],0,rep(1/nd,nd))
+# ub = c(Inf,Inf,rep(Inf,nd))
+lb = c(0,0,rep(-Inf,nd)) 
+# Maximizing over 
+
+# number of constraints is number of days*2 ()
+A = matrix(0,2*nd,nd+2)
+rhs = rep(0,2*nd)
+dir = rep('<',2*nd)
+
+# Friendly reminder that p is first, q is second. 
+for(r in 1:nd){ # For every day create two constraints
+  # This is the constraint where q > D
+  #h_i + (t+c)q - t\beta_1*p \leq t(\beta_0+\epsilon)
+  A[2*r-1,c(1,2,r+2)] = c(-t*lin_model$coefficients[2],(c+t),1) 
+  rhs[2*r-1] = t*(lin_model$coefficients[1]+data_resid$residuals[[r]])
+  
+  # This is the constraint where q < D
+  #h_i + q(g-c) - gp\beta_1 \leq g(\beta_0 + \epsilon) 
+  A[2*r,c(1,2,r+2)] = c(g*(lin_model$coefficients[2]), (c-g) ,1) 
+  rhs[2*r] = -g*(lin_model$coefficients[1]+data_resid$residuals[[r]])
+}
+
+nvqp.model = list()
+nvqp.model$modelsense = 'max'
+
+# This takes in the quadratic part of the objective function
+nvqp.model$Q = quad
+
+# This takes the linear part of the objective function
+nvqp.model$obj = obj 
+
+# Should be fine since linear constraints. 
+nvqp.model$A = A
+nvqp.model$rhs = rhs
+nvqp.model$sense = dir
+#nvqp.model$ub = ub
+nvqp.model$lb = lb
+
+
+params = list()
+params$outputflag = 0
+qp.nvqp = gurobi(nvqp.model,params=params)
+#qp.nvqp$x
+
+```
+
+<br>
+
+##### *QP Results*
+Using the model above tells us that
+```{r, echo=FALSE, results='asis'}
+
+cat(paste0('optimal price is $',round(qp.nvqp$x[1],2),', '))
+cat(paste0('optimal quantity is ',round(qp.nvqp$x[2],0),' newspapers, and '))
+cat(paste0('expected profit is $',round(qp.nvqp$objval,2),'.'))
+
+```
+
+<br><br>
+
+#### `6` Sensitivity Analysis Using Bootstrap Sampling
+Next, we want to know how sensitive the optimal price and quantity are to our data set; to do this, we take a bootstrap sample of the data, fit new betas to our sample, and find optimal price and quantity from said betas. We repeat this 1000 times and include the results below for your viewing pleasure.
+
+<br>
+
+##### *Bootstrap Code*
+```{r}
+price_list = c()
+quantity_list = c()
+profit_list = c()
+
+for (i in 1:1000) {
+    bsData = data[sample(nrow(data), round(nrow(data)*0.9), replace=TRUE),]
+    nd = nrow(bsData)
+
+bsLin_model = lm(demand ~ price, data = bsData)
+    
+    b0 = coef(bsLin_model)[1]
+    b1 = coef(bsLin_model)[2]
+    obj = c(b0+mean(residuals(lin_model)),0,rep(1/nd,nd))
+    lb = c(0,0,rep(-Inf,nd))
+    Q = matrix(0,nd+2,nd+2)
+    Q[1,1] = b1
+    
+    A = matrix(0,2*nd,nd+2)
+    rhs = rep(0,2*nd)
+    dir = rep('<',2*nd)
+    
+    for(r in 1:nd){
+      
+      A[2*r-1,c(1,2,r+2)] = c(g*b1,c-g,1) ## Still using all the same cgt from part 2
+      rhs[2*r-1] = -g*b0 - g*residuals(lin_model)[r]
+
+      A[2*r,c(1,2,r+2)] = c(-t*b1,c+t,1)
+      rhs[2*r] = t*b0 + t*residuals(lin_model)[r]
+    }
+    
+    q6.model = list()
+    q6.model$modelsense = 'max'
+    q6.model$Q = Q
+    q6.model$obj = obj 
+    q6.model$A = A
+    q6.model$rhs = rhs
+    q6.model$sense = dir
+    q6.model$lb = lb
+    
+    params = list()
+    params$outputflag = 0
+    bootModel = gurobi(q6.model,params=params)
+
+    price_list = c(price_list, bootModel$x[1])
+    quantity_list = c(quantity_list, bootModel$x[2])
+    profit_list = c(profit_list, bootModel$objval)
+}
+
+```
+
+<br>
+
+##### *Bootstrap Results*
+Over 1000 sampling iterations, we get the following results:
+```{r, echo=FALSE}
+
+strapNum = seq(1,1000,1)
+results<-data.frame(strapNum,price_list,quantity_list,profit_list)
+names(results)[names(results) == "strapNum"] <- "Bootstrap Iteration"
+names(results)[names(results) == "price_list"] <- "Optimal Price"
+names(results)[names(results) == "quantity_list"] <- "Optimal Quantity"
+names(results)[names(results) == "profit_list"] <- "Profit"
+
+kbl(results) %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  kable_paper() %>%
+  scroll_box(width = "100%", height = "250px")
+
+```
+
+<br><br>
+
+#### `7` Visualization for our 1000 Sampling Iterations
+Below, the scatterplot visualizes the spread of optimal price and quantity results for each of our 1000 samples; the marginal histograms further illustrate the frequency distributions of price and quantity.
+
+<br>
+
+```{r, echo=FALSE}
+
+# Marginal histograms
+price_hist = ggplot() + geom_histogram(aes(price_list),fill='black',color='grey',binwidth=.001) +
+  xlab('') + ylab(' \n') ## X axis price
+quant_hist = ggplot() + geom_histogram(aes(quantity_list),fill='black',color='grey',binwidth=4.5) + 
+  coord_flip() + xlab('') + ylab(' \n') + stat_bin(bins=50) ## Y Axis quant
+
+# For positioning w grid
+empty <- ggplot()+geom_point(aes(1,1), colour="white")+
+         theme(axis.ticks=element_blank(), 
+               panel.background=element_blank(), 
+               axis.text.x=element_blank(), axis.text.y=element_blank(),           
+               axis.title.x=element_blank(), axis.title.y=element_blank())
+
+# Scatterplot
+scatter = ggplot(results, aes(x=price_list, y=quantity_list)) + geom_point() + theme(legend.position="none") +
+  xlab('\nOptimal Price') + ylab('Optimal Quantity\n')
+
+grid.arrange(price_hist, empty, scatter, quant_hist, ncol=2, nrow=2, widths=c(4, 1.15), heights=c(1.5,4))
+
+```
+
+<br>
+
+#### `8` Comparing Our Boss' Standard Newsvendor Approach to our QP Approach
+Our quadratic programming approach is more accurate and more responsive to changing demand than the basic newsvendor approach. Our QP approach extends the NV model to account for disposal and rush printing costs which result from dynamic demand. As such, this approach is more accurate. The QP approach yields higher revenue (see the distribution of profit generated by our 1000 bootstrap samples below) based on optimal expected values and the median of the profits below. 
+
+One key insight from our bootstrapping results is that the mode of expected profits is sometimes lower than the profit we would expect from our NV model gives us in part 3. This is to be expected, as our model is fine-tuned to be more realistic and responsive to changes in demand as a function of price.
+
+```{r, echo=FALSE, results='asis'}
+
+cat(paste0('The profit from our 1000 QP samples is greater than that of the simple NV model ',
+           100*round(sum(profit_list[profit_list]>=nv.sol$objval)/length(profit_list),2),'% of the time. A seed has not been set, so you\'ll see a different value each time you knit; we have seen different percentages as high as 81% and as low as 31%. This sums up the key tradeoff when deciding to use the QP approach over the NV/LP approach. We can be a lot more accurate, but we deal with more variation and risk in the form of profit projection volatility.'))
+
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+cat(paste0('\n\nMedian Expected Profts: $',round(median(profit_list),2)))
+cat(paste0('\n\nMode of Expected Profts: $',round(getmode(profit_list),2)))
+
+```
+
+<br>
+
+```{r, echo=FALSE, results='asis'}
+
+ggplot()+geom_histogram(aes(profit_list),color='grey',fill='black',binwidth=.75) + 
+  ggtitle('Sample Profits Frequency Distribution') + xlab('\nIteration Profit') + ylab('Frequency\n') +
+  geom_vline(xintercept = nv.sol$objval, color='red') +
+  geom_text(aes(x=nv.sol$objval+9,y=50,label=paste0('NV E(Profit): $',round(nv.sol$objval,2)),color='red',fontface='bold')) + 
+  theme(legend.position="none")
+
+```
